@@ -16,9 +16,11 @@ win32-g++ {
 
 SOURCES += \
     main.cpp \
+    stream_pipeline.cpp \
     widget.cpp
 
 HEADERS += \
+    stream_pipeline.h \
     widget.h \
     xdmaDLL_public.h
 

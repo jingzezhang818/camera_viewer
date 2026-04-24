@@ -28,6 +28,7 @@ public:
     QVBoxLayout *verticalLayout;
     QHBoxLayout *topButtonLayout;
     QPushButton *btnOpenXdma;
+    QPushButton *btnRunSelfTest;
     QPushButton *btnStartReceive;
     QPushButton *btnStopReceive;
     QSpacerItem *topSpacer;
@@ -57,6 +58,11 @@ public:
         btnOpenXdma->setObjectName(QString::fromUtf8("btnOpenXdma"));
 
         topButtonLayout->addWidget(btnOpenXdma);
+
+        btnRunSelfTest = new QPushButton(Widget);
+        btnRunSelfTest->setObjectName(QString::fromUtf8("btnRunSelfTest"));
+
+        topButtonLayout->addWidget(btnRunSelfTest);
 
         btnStartReceive = new QPushButton(Widget);
         btnStartReceive->setObjectName(QString::fromUtf8("btnStartReceive"));
@@ -101,7 +107,7 @@ public:
         spinHeight->setMinimum(16);
         spinHeight->setMaximum(4096);
         spinHeight->setSingleStep(16);
-        spinHeight->setValue(480);
+        spinHeight->setValue(360);
 
         paramLayout->addWidget(spinHeight);
 
@@ -164,6 +170,7 @@ public:
     {
         Widget->setWindowTitle(QApplication::translate("Widget", "XDMA C2H Video Viewer", nullptr));
         btnOpenXdma->setText(QApplication::translate("Widget", "\346\211\223\345\274\200 XDMA \345\271\266\350\207\252\346\243\200", nullptr));
+        btnRunSelfTest->setText(QApplication::translate("Widget", "\350\277\220\350\241\214\345\215\217\350\256\256\350\207\252\346\265\213", nullptr));
         btnStartReceive->setText(QApplication::translate("Widget", "\345\274\200\345\247\213\346\216\245\346\224\266 C2H", nullptr));
         btnStopReceive->setText(QApplication::translate("Widget", "\345\201\234\346\255\242", nullptr));
         labelWidth->setText(QApplication::translate("Widget", "\345\256\275:", nullptr));
