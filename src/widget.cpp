@@ -18,7 +18,7 @@
 #include <vector>
 
 #include "stream_pipeline.h"
-#include "xdmaDLL_public.h"
+#include "xdmaDLL_public_linux.h"
 
 namespace {
 
@@ -33,7 +33,7 @@ constexpr int kMaxReadChunkBytes = 8 * 1024 * 1024;
 
 /**
  * @brief isValidHandle
- * 统一判断 Windows HANDLE 是否有效。
+ * 统一判断 XDMA HANDLE 是否有效。
  */
 bool isValidHandle(HANDLE handle)
 {
@@ -108,15 +108,21 @@ void C2hReaderWorker::start(quintptr c2hHandleValue,
     }
 
     // 在 worker 线程中复制一份句柄，避免 UI 线程关闭原句柄导致并发访问风险。
-    HANDLE c2h = INVALID_HANDLE_VALUE;
-    if (!DuplicateHandle(GetCurrentProcess(),
-                         sourceHandle,
-                         GetCurrentProcess(),
-                         &c2h,
-                         0,
-                         FALSE,
-                         DUPLICATE_SAME_ACCESS)
-        || !isValidHandle(c2h)) {
+    // Linux 下 HANDLE 是 fd 封装，这里复制底层 fd（dup）并重新封装为 HANDLE。
+    const int sourceFd = xdma_handle_to_fd(sourceHandle);
+    if (sourceFd < 0) {
+        m_running.store(false);
+        emit readError(-2004);
+        emit stopped();
+        return;
+    }
+
+    const int c2hDupFd = dup(sourceFd);
+    HANDLE c2h = xdma_fd_to_handle(c2hDupFd);
+    if (c2hDupFd < 0 || !isValidHandle(c2h)) {
+        if (c2hDupFd >= 0) {
+            close(c2hDupFd);
+        }
         m_running.store(false);
         emit readError(-2004);
         emit stopped();
@@ -821,14 +827,16 @@ bool Widget::startVideoDump(int width, int height)
     }
 
     const QString sourcePath = QString::fromLocal8Bit(__FILE__);
-    const QString projectDirPath = QFileInfo(sourcePath).absolutePath();
+    QDir projectDir(QFileInfo(sourcePath).absolutePath());
+    // 迁移到 src/ 后保持历史行为：默认将 dump 文件落在项目根目录。
+    if (projectDir.dirName() == QStringLiteral("src")) {
+        projectDir.cdUp();
+    }
     const QString timeTag = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz");
     const QString fileName = QString("c2h_dump_%1_%2x%3_yuyv422.yuv")
                                  .arg(timeTag)
                                  .arg(width)
                                  .arg(height);
-
-    QDir projectDir(projectDirPath);
     m_videoDumpPath = projectDir.filePath(fileName);
     m_videoDumpFile.setFileName(m_videoDumpPath);
 
