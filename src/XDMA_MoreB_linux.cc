@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -167,6 +168,47 @@ static std::string compose_device_path(const char* base_path, const char* device
     return base + "/" + channel;
 }
 
+static int mmap_register_access(int fd, long address, DWORD size, BYTE* buffer, bool write_access)
+{
+    if (fd < 0 || !buffer || address < 0 || size != sizeof(uint32_t)
+        || (address & 0x3L) != 0) {
+        return -3;
+    }
+
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) {
+        page_size = 4096;
+    }
+
+    const off_t target = static_cast<off_t>(address);
+    const off_t target_aligned = target & ~(static_cast<off_t>(page_size) - 1);
+    const size_t offset = static_cast<size_t>(target - target_aligned);
+    const size_t map_size = offset + sizeof(uint32_t);
+    const int prot = write_access ? (PROT_READ | PROT_WRITE) : PROT_READ;
+
+    void* map = mmap(NULL, map_size, prot, MAP_SHARED, fd, target_aligned);
+    if (map == MAP_FAILED) {
+        return -1;
+    }
+
+    char* bytes = static_cast<char*>(map);
+    volatile uint32_t* reg = reinterpret_cast<volatile uint32_t*>(bytes + offset);
+    if (write_access) {
+        uint32_t value = 0;
+        memcpy(&value, buffer, sizeof(value));
+        *reg = value;
+    } else {
+        const uint32_t value = *reg;
+        memcpy(buffer, &value, sizeof(value));
+    }
+
+    if (munmap(map, map_size) != 0) {
+        return -1;
+    }
+
+    return static_cast<int>(size);
+}
+
 } // namespace
 
 BYTE* allocate_buffer(size_t size, size_t alignment)
@@ -201,6 +243,9 @@ int write_device(HANDLE device, long address, DWORD size, BYTE *buffer)
         return -3;
     }
     if (lseek(fd, static_cast<off_t>(address), SEEK_SET) == static_cast<off_t>(-1)) {
+        if (errno == ESPIPE) {
+            return mmap_register_access(fd, address, size, buffer, true);
+        }
         return -3;
     }
 
@@ -221,6 +266,9 @@ int read_device(HANDLE device, long address, DWORD size, BYTE *buffer)
         return -3;
     }
     if (lseek(fd, static_cast<off_t>(address), SEEK_SET) == static_cast<off_t>(-1)) {
+        if (errno == ESPIPE) {
+            return mmap_register_access(fd, address, size, buffer, false);
+        }
         return -3;
     }
 
