@@ -40,7 +40,7 @@
 - 包格式：`EB 90 | lengthH | lengthL | dest(6) | source(6) | priority(2) | payload(1006)`
 
 解析规则：
-- `length` 取 `0..1006`。
+- `length` 表示包总长度（包头 + 有效 payload），取 `18..1024`。
 - 只提取有效 payload，自动忽略 padding 0。
 - sync 错位或非法 length 时自动重同步。
 

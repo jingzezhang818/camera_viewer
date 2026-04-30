@@ -62,6 +62,51 @@ QString toHex32(quint32 value)
     return QString("0x%1").arg(value, 8, 16, QLatin1Char('0')).toUpper();
 }
 
+
+QString summarizeIntSeries(const QVector<int> &values, int sampleCount = 12)
+{
+    if (values.isEmpty()) {
+        return "count=0";
+    }
+
+    int minValue = values.first();
+    int maxValue = values.first();
+    bool allEqual = true;
+
+    for (const int value : values) {
+        if (value < minValue) {
+            minValue = value;
+        }
+        if (value > maxValue) {
+            maxValue = value;
+        }
+        if (value != values.first()) {
+            allEqual = false;
+        }
+    }
+
+    QString summary = QString("count=%1 min=%2 max=%3")
+                          .arg(values.size())
+                          .arg(minValue)
+                          .arg(maxValue);
+    if (allEqual) {
+        summary += QString(" uniform=%1").arg(values.first());
+        return summary;
+    }
+
+    const int n = qMin(sampleCount, values.size());
+    QVector<int> sample;
+    sample.reserve(n);
+    for (int i = 0; i < n; ++i) {
+        sample.push_back(values[i]);
+    }
+
+    summary += QString(" sample=%1").arg(joinIntValues(sample));
+    if (values.size() > n) {
+        summary += ",...";
+    }
+    return summary;
+}
 } // namespace
 
 // ============================================================================
@@ -83,7 +128,8 @@ void C2hReaderWorker::start(quintptr c2hHandleValue,
                             int chunkBytes,
                             int throttleMs,
                             int width,
-                            int height)
+                            int height,
+                            QString rawDumpPath)
 {
     // 防止同一 worker 被重复启动。
     if (m_running.exchange(true)) {
@@ -134,12 +180,50 @@ void C2hReaderWorker::start(quintptr c2hHandleValue,
         return;
     }
 
-    emit workerLog(QString("[INFO] Reader pipeline: packet=%1B header=%2B payload=%3B frameBytes=%4 chunk=%5B")
+    emit workerLog(QString("[INFO] Reader pipeline: packet=%1B header=%2B payloadMax=%3B lengthField=totalBytes frameBytes=%4 chunk=%5B")
                        .arg(VideoPacketParser::kPacketSize)
                        .arg(VideoPacketParser::kHeaderSize)
                        .arg(VideoPacketParser::kPayloadSize)
                        .arg(streamConfig.frameBytes)
                        .arg(safeChunkBytes));
+
+    QFile rawDumpFile;
+    QFile depacketizedDumpFile;
+    QString depacketizedDumpPath;
+    qint64 rawDumpBytes = 0;
+    int rawDumpChunks = 0;
+    qint64 depacketizedDumpBytes = 0;
+    int depacketizedDumpChunks = 0;
+    if (!rawDumpPath.isEmpty()) {
+        rawDumpFile.setFileName(rawDumpPath);
+        if (!rawDumpFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            free_buffer(chunkBuffer);
+            CloseHandle(c2h);
+            m_running.store(false);
+            emit workerLog(QString("[ERROR] Open raw C2H dump file failed: %1").arg(rawDumpPath));
+            emit readError(-2005);
+            emit stopped();
+            return;
+        }
+        emit workerLog(QString("[INFO] Raw C2H dump started: %1").arg(rawDumpPath));
+
+        const QFileInfo rawInfo(rawDumpPath);
+        depacketizedDumpPath = rawInfo.dir().filePath(
+            QString("%1_depacketized.bin").arg(rawInfo.completeBaseName()));
+        depacketizedDumpFile.setFileName(depacketizedDumpPath);
+        if (!depacketizedDumpFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            rawDumpFile.close();
+            free_buffer(chunkBuffer);
+            CloseHandle(c2h);
+            m_running.store(false);
+            emit workerLog(QString("[ERROR] Open depacketized dump file failed: %1")
+                               .arg(depacketizedDumpPath));
+            emit readError(-2007);
+            emit stopped();
+            return;
+        }
+        emit workerLog(QString("[INFO] Depacketized dump started: %1").arg(depacketizedDumpPath));
+    }
 
     // 构建两级处理模块：协议解包 + 固定帧长重组。
     StreamDepacketizer depacketizer;
@@ -155,7 +239,11 @@ void C2hReaderWorker::start(quintptr c2hHandleValue,
             break;
         }
 
-        if (ret <= 0) {
+        if (ret == 0) {
+            QThread::msleep(static_cast<unsigned long>(kReaderErrorBackoffMs));
+            continue;
+        }
+        if (ret < 0) {
             emit readError(ret);
             QThread::msleep(static_cast<unsigned long>(kReaderErrorBackoffMs));
             continue;
@@ -164,7 +252,32 @@ void C2hReaderWorker::start(quintptr c2hHandleValue,
         const QByteArray incoming(reinterpret_cast<const char *>(chunkBuffer), ret);
         emit workerLog(QString("[RX] received=%1B").arg(ret));
 
+        if (rawDumpFile.isOpen()) {
+            const qint64 written = rawDumpFile.write(incoming);
+            if (written != incoming.size()) {
+                emit workerLog(QString("[ERROR] Raw C2H dump write failed: expected=%1B written=%2B")
+                                   .arg(incoming.size())
+                                   .arg(written));
+                emit readError(-2006);
+                break;
+            }
+            rawDumpBytes += written;
+            ++rawDumpChunks;
+        }
+
         const StreamDepacketizer::BatchResult dep = depacketizer.pushBytes(incoming);
+        if (depacketizedDumpFile.isOpen() && !dep.restoredBytes.isEmpty()) {
+            const qint64 written = depacketizedDumpFile.write(dep.restoredBytes);
+            if (written != dep.restoredBytes.size()) {
+                emit workerLog(QString("[ERROR] Depacketized dump write failed: expected=%1B written=%2B")
+                                   .arg(dep.restoredBytes.size())
+                                   .arg(written));
+                emit readError(-2008);
+                break;
+            }
+            depacketizedDumpBytes += written;
+            ++depacketizedDumpChunks;
+        }
         emit workerLog(QString("[PROTO] cache=%1B parsed=%2 restored+%3B restoredTotal=%4B "
                                "syncMismatch+%5(total=%6) invalidLength+%7(total=%8) "
                                "resync+%9(total=%10)")
@@ -180,10 +293,12 @@ void C2hReaderWorker::start(quintptr c2hHandleValue,
                            .arg(dep.totalResyncCount));
 
         if (!dep.packetLengths.isEmpty()) {
-            emit workerLog(QString("[PROTO] packet_lengths=%1").arg(joinIntValues(dep.packetLengths)));
+            emit workerLog(QString("[PROTO] packet_lengths {%1}")
+                               .arg(summarizeIntSeries(dep.packetLengths)));
         }
         if (!dep.resyncPositions.isEmpty()) {
-            emit workerLog(QString("[PROTO] resync_positions=%1").arg(joinIntValues(dep.resyncPositions)));
+            emit workerLog(QString("[PROTO] resync_positions {%1}")
+                               .arg(summarizeIntSeries(dep.resyncPositions)));
         }
 
         const Yuy2FrameReassembler::BatchResult frameBatch = frameReassembler.pushBytes(dep.restoredBytes);
@@ -203,6 +318,23 @@ void C2hReaderWorker::start(quintptr c2hHandleValue,
         }
     }
 
+    if (rawDumpFile.isOpen()) {
+        rawDumpFile.flush();
+        rawDumpFile.close();
+        emit workerLog(QString("[INFO] Raw C2H dump saved: %1, chunks=%2, bytes=%3")
+                           .arg(rawDumpPath)
+                           .arg(rawDumpChunks)
+                           .arg(rawDumpBytes));
+    }
+    if (depacketizedDumpFile.isOpen()) {
+        depacketizedDumpFile.flush();
+        depacketizedDumpFile.close();
+        emit workerLog(QString("[INFO] Depacketized dump saved: %1, chunks=%2, bytes=%3")
+                           .arg(depacketizedDumpPath)
+                           .arg(depacketizedDumpChunks)
+                           .arg(depacketizedDumpBytes));
+    }
+
     // 统一资源回收出口。
     free_buffer(chunkBuffer);
     CloseHandle(c2h);
@@ -219,6 +351,7 @@ Widget::Widget(QWidget *parent)
     , ui(new Ui::Widget)
 {
     ui->setupUi(this);
+    qRegisterMetaType<quintptr>("quintptr");
 
     // 初始化 AXI-Lite 寄存器读写调试区域。
     initializeAxiLiteControls();
@@ -412,6 +545,16 @@ void Widget::on_btnStartReceive_clicked()
         return;
     }
 
+    {
+        const QString sourcePath = QString::fromLocal8Bit(__FILE__);
+        const QString projectDirPath = QFileInfo(sourcePath).absolutePath();
+        const QString timeTag = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz");
+        const QString fileName = QString("c2h_raw_%1.bin").arg(timeTag);
+        QDir projectDir(projectDirPath);
+        m_rawDumpPath = projectDir.filePath(fileName);
+        appendLog(QString("[INFO] Raw C2H dump target: %1").arg(m_rawDumpPath));
+    }
+
     m_receivedFrames = 0;
     setReceivingUiState(true);
 
@@ -422,21 +565,22 @@ void Widget::on_btnStartReceive_clicked()
                   .arg(throttleMs));
 
     // 使用 QueuedConnection 保证 start() 在 worker 所在线程执行。
-    const quintptr handleValue = reinterpret_cast<quintptr>(m_c2h0Handle);
-    const bool invokeOk = QMetaObject::invokeMethod(m_readerWorker,
-                                                     "start",
-                                                     Qt::QueuedConnection,
-                                                     Q_ARG(quintptr, handleValue),
-                                                     Q_ARG(int, frameBytes),
-                                                     Q_ARG(int, chunkBytes),
-                                                     Q_ARG(int, throttleMs),
-                                                     Q_ARG(int, width),
-                                                     Q_ARG(int, height));
-    if (!invokeOk) {
-        appendLog("[ERROR] Failed to start reader worker.");
+    if (!m_readerWorker || !m_readerThread || !m_readerThread->isRunning()) {
+        appendLog("[ERROR] Reader thread is not ready.");
         setReceivingUiState(false);
         stopVideoDump();
+        m_rawDumpPath.clear();
+        return;
     }
+
+    const quintptr handleValue = reinterpret_cast<quintptr>(m_c2h0Handle);
+    emit startReaderRequested(handleValue,
+                              frameBytes,
+                              chunkBytes,
+                              throttleMs,
+                              width,
+                              height,
+                              m_rawDumpPath);
 }
 
 void Widget::on_btnStopReceive_clicked()
@@ -453,6 +597,14 @@ void Widget::on_btnStopReceive_clicked()
 
     setReceivingUiState(false);
     stopVideoDump();
+}
+
+void Widget::on_btnClearLog_clicked()
+{
+    if (!ui || !ui->plainTextEdit) {
+        return;
+    }
+    ui->plainTextEdit->clear();
 }
 
 // ============================================================================
@@ -489,14 +641,7 @@ void Widget::onReaderError(int code)
         return;
     }
 
-    appendLog(QString("[ERROR] C2H read failed: %1").arg(code));
-
-    if (m_readerWorker) {
-        m_readerWorker->requestStop();
-    }
-
-    setReceivingUiState(false);
-    stopVideoDump();
+    appendLog(QString("[WARN] C2H read returned %1, keep listening...").arg(code));
 }
 
 void Widget::onReaderStopped()
@@ -506,6 +651,7 @@ void Widget::onReaderStopped()
     }
 
     stopVideoDump();
+    m_rawDumpPath.clear();
     closeXdmaHandles();
     appendLog("[INFO] Reader stopped.");
 }
@@ -544,6 +690,11 @@ void Widget::setupReaderThread()
             &C2hReaderWorker::stopped,
             this,
             &Widget::onReaderStopped,
+            Qt::QueuedConnection);
+    connect(this,
+            &Widget::startReaderRequested,
+            m_readerWorker,
+            &C2hReaderWorker::start,
             Qt::QueuedConnection);
 
     connect(m_readerThread, &QThread::finished, m_readerWorker, &QObject::deleteLater);
@@ -980,3 +1131,4 @@ void Widget::appendLog(const QString &text)
     const QString stamp = QDateTime::currentDateTime().toString("hh:mm:ss.zzz");
     ui->plainTextEdit->appendPlainText(QString("[%1] %2").arg(stamp, text));
 }
+

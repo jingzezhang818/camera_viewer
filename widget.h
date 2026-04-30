@@ -54,6 +54,7 @@ public slots:
      * @param throttleMs 每次输出完整帧后可选节流（毫秒）
      * @param width 帧宽（像素）
      * @param height 帧高（像素）
+     * @param rawDumpPath 原始 C2H 字节流落盘路径（.bin），为空则不落盘
      *
      * 处理链路：
      *   read_device(任意分段) -> StreamDepacketizer -> Yuy2FrameReassembler -> frameReady
@@ -63,7 +64,8 @@ public slots:
                int chunkBytes,
                int throttleMs,
                int width,
-               int height);
+               int height,
+               QString rawDumpPath);
 
 signals:
     /**
@@ -110,6 +112,18 @@ public:
     explicit Widget(QWidget *parent = nullptr);
     ~Widget() override;
 
+signals:
+    /**
+     * @brief 请求在 worker 线程启动 C2H 持续接收
+     */
+    void startReaderRequested(quintptr c2hHandleValue,
+                              int frameBytes,
+                              int chunkBytes,
+                              int throttleMs,
+                              int width,
+                              int height,
+                              QString rawDumpPath);
+
 protected:
     /**
      * @brief resizeEvent 窗口缩放时重绘最后一帧
@@ -138,6 +152,11 @@ private slots:
      * @brief 停止接收
      */
     void on_btnStopReceive_clicked();
+
+    /**
+     * @brief 清空日志窗口
+     */
+    void on_btnClearLog_clicked();
 
     // -------------------- Reader 回调 --------------------
 
@@ -292,6 +311,7 @@ private:
 
     QFile m_videoDumpFile;
     QString m_videoDumpPath;
+    QString m_rawDumpPath;
     int m_videoDumpWidth = 0;
     int m_videoDumpHeight = 0;
     qint64 m_videoDumpBytes = 0;

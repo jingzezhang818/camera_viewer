@@ -81,7 +81,7 @@ struct VideoStreamConfig
  * - 头部 18B，payload 区域 1006B
  * - 字段布局：
  *   EB 90 | lengthH | lengthL | dest(6) | source(6) | priority(2) | payload(1006)
- * - length 表示 payload 的真实有效字节数，范围 [0,1006]
+ * - length 表示包总长度（包头 + 有效 payload），范围 [18,1024]
  * - payload 其余字节可能是 0 padding，必须丢弃
  */
 class VideoPacketParser
@@ -105,7 +105,7 @@ public:
 
     /**
      * @brief 单包解析输出。
-     * payload 中只包含前 length 字节有效数据，不包含 padding。
+     * payload 中只包含有效 payload 字节（length - header），不包含 padding。
      */
     struct Packet {
         int payloadLength = 0;

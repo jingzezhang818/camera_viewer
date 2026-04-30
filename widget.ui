@@ -45,6 +45,13 @@
       </widget>
      </item>
      <item>
+      <widget class="QPushButton" name="btnClearLog">
+       <property name="text">
+        <string>清空日志</string>
+       </property>
+      </widget>
+     </item>
+     <item>
       <spacer name="topSpacer">
        <property name="orientation">
         <enum>Qt::Horizontal</enum>
@@ -140,13 +147,13 @@
      <item>
       <widget class="QSpinBox" name="spinChunkKB">
        <property name="minimum">
-        <number>64</number>
+        <number>1</number>
        </property>
        <property name="maximum">
         <number>4096</number>
        </property>
        <property name="singleStep">
-        <number>64</number>
+        <number>1</number>
        </property>
        <property name="value">
         <number>512</number>

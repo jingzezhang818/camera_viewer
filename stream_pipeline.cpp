@@ -50,13 +50,14 @@ QByteArray makePatternBytes(int size, int seed)
 QByteArray buildProtocolPacket(const QByteArray &payload)
 {
     const int payloadLen = qBound(0, payload.size(), VideoPacketParser::kPayloadSize);
+    const int totalLength = VideoPacketParser::kHeaderSize + payloadLen;
     QByteArray packet(VideoPacketParser::kPacketSize, '\0');
 
     // 固定协议头。
     packet[0] = static_cast<char>(VideoPacketParser::kSync0);
     packet[1] = static_cast<char>(VideoPacketParser::kSync1);
-    packet[2] = static_cast<char>((payloadLen >> 8) & 0xFF);
-    packet[3] = static_cast<char>(payloadLen & 0xFF);
+    packet[2] = static_cast<char>((totalLength >> 8) & 0xFF);
+    packet[3] = static_cast<char>(totalLength & 0xFF);
 
     // route 字段与发送端默认值保持一致。
     const char dest[6] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
@@ -255,13 +256,14 @@ VideoPacketParser::Status VideoPacketParser::parsePacket(const char *packet,
         return Status::SyncMismatch;
     }
 
-    // length 取值范围必须落在 [0,1006]。
-    const int payloadLength = (static_cast<int>(bytes[2]) << 8) | static_cast<int>(bytes[3]);
-    if (payloadLength < 0 || payloadLength > kPayloadSize) {
+    // length is the total bytes in this packet: header + valid payload.
+    const int totalLength = (static_cast<int>(bytes[2]) << 8) | static_cast<int>(bytes[3]);
+    if (totalLength < kHeaderSize || totalLength > kPacketSize) {
         return Status::InvalidLength;
     }
 
-    // 只拷贝 length 指定的真实字节，不把 padding 0 带入输出。
+    // Only extract valid payload bytes; ignore trailing zero padding.
+    const int payloadLength = totalLength - kHeaderSize;
     outPacket.payloadLength = payloadLength;
     if (payloadLength > 0) {
         outPacket.payload = QByteArray(packet + kHeaderSize, payloadLength);

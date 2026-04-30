@@ -17,7 +17,8 @@ win32-g++ {
 SOURCES += \
     main.cpp \
     stream_pipeline.cpp \
-    widget.cpp
+    widget.cpp \
+    XDMA_MoreB.cpp
 
 HEADERS += \
     stream_pipeline.h \
@@ -27,9 +28,10 @@ HEADERS += \
 FORMS += \
     widget.ui
 
-INCLUDEPATH += $$PWD/driver
+DEFINES += K7CTRBOARDDRIVER
+
 win32 {
-    LIBS += -L$$PWD/driver -lXDMA_MoreB
+    LIBS += -lsetupapi
 }
 
 qnx: target.path = /tmp/$${TARGET}/bin
