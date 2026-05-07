@@ -31,6 +31,7 @@ public:
     QPushButton *btnRunSelfTest;
     QPushButton *btnStartReceive;
     QPushButton *btnStopReceive;
+    QPushButton *btnClearLog;
     QSpacerItem *topSpacer;
     QHBoxLayout *paramLayout;
     QLabel *labelWidth;
@@ -73,6 +74,11 @@ public:
         btnStopReceive->setObjectName(QString::fromUtf8("btnStopReceive"));
 
         topButtonLayout->addWidget(btnStopReceive);
+
+        btnClearLog = new QPushButton(Widget);
+        btnClearLog->setObjectName(QString::fromUtf8("btnClearLog"));
+
+        topButtonLayout->addWidget(btnClearLog);
 
         topSpacer = new QSpacerItem(40, 20, QSizePolicy::Expanding, QSizePolicy::Minimum);
 
@@ -132,9 +138,9 @@ public:
 
         spinChunkKB = new QSpinBox(Widget);
         spinChunkKB->setObjectName(QString::fromUtf8("spinChunkKB"));
-        spinChunkKB->setMinimum(64);
+        spinChunkKB->setMinimum(1);
         spinChunkKB->setMaximum(4096);
-        spinChunkKB->setSingleStep(64);
+        spinChunkKB->setSingleStep(1);
         spinChunkKB->setValue(512);
 
         paramLayout->addWidget(spinChunkKB);
@@ -173,6 +179,7 @@ public:
         btnRunSelfTest->setText(QApplication::translate("Widget", "\350\277\220\350\241\214\345\215\217\350\256\256\350\207\252\346\265\213", nullptr));
         btnStartReceive->setText(QApplication::translate("Widget", "\345\274\200\345\247\213\346\216\245\346\224\266 C2H", nullptr));
         btnStopReceive->setText(QApplication::translate("Widget", "\345\201\234\346\255\242", nullptr));
+        btnClearLog->setText(QApplication::translate("Widget", "\346\270\205\347\251\272\346\227\245\345\277\227", nullptr));
         labelWidth->setText(QApplication::translate("Widget", "\345\256\275:", nullptr));
         labelHeight->setText(QApplication::translate("Widget", "\351\253\230", nullptr));
         labelThrottle->setText(QApplication::translate("Widget", "\350\212\202\346\265\201\346\227\266\351\227\264 (ms):", nullptr));
