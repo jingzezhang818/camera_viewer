@@ -1,1 +1,6 @@
 build/
+
+# Runtime capture artifacts
+c2h_rx_raw_*.bin
+c2h_rx_unpacked_*.bin
+c2h_dump_*.yuv

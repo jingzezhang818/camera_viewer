@@ -111,6 +111,7 @@ K7CTRBOARDDRIVER_API void free_buffer(BYTE* buf);
 
 K7CTRBOARDDRIVER_API int write_device(HANDLE device, long address, DWORD size, BYTE *buffer);
 K7CTRBOARDDRIVER_API int read_device(HANDLE device, long address, DWORD size, BYTE *buffer);
+K7CTRBOARDDRIVER_API int read_device_allow_partial(HANDLE device, long address, DWORD size, BYTE *buffer);
 
 K7CTRBOARDDRIVER_API int get_devices(GUID guid, char** devpath, size_t len_devpath);
 K7CTRBOARDDRIVER_API int open_devices(HANDLE *device_hd,

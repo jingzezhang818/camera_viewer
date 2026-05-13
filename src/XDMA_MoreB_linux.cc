@@ -282,6 +282,26 @@ int read_device(HANDLE device, long address, DWORD size, BYTE *buffer)
     return static_cast<int>(size);
 }
 
+int read_device_allow_partial(HANDLE device, long address, DWORD size, BYTE *buffer)
+{
+    const int fd = xdma_handle_to_fd(device);
+    if (fd < 0) {
+        return -3;
+    }
+    if (lseek(fd, static_cast<off_t>(address), SEEK_SET) == static_cast<off_t>(-1)) {
+        if (errno == ESPIPE) {
+            return mmap_register_access(fd, address, size, buffer, false);
+        }
+        return -3;
+    }
+
+    const ssize_t rd_size = read(fd, buffer, static_cast<size_t>(size));
+    if (rd_size < 0) {
+        return -1;
+    }
+    return static_cast<int>(rd_size);
+}
+
 int get_devices(GUID guid, char** devpath, size_t len_devpath)
 {
     (void)guid;

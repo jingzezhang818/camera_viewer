@@ -48,7 +48,7 @@ public:
 public slots:
     /**
      * @brief start 后台读取主流程
-     * @param c2hHandleValue UI 线程传入的 HANDLE（以整数封装）
+     * @param c2hHandleValue UI 线程传入的 HANDLE（以 64bit 整数封装）
      * @param frameBytes 单帧目标字节数（当前默认 640*360*2=460800）
      * @param chunkBytes 每次 read_device 请求字节数
      * @param throttleMs 每次输出完整帧后可选节流（毫秒）
@@ -58,7 +58,7 @@ public slots:
      * 处理链路：
      *   read_device(任意分段) -> StreamDepacketizer -> Yuy2FrameReassembler -> frameReady
      */
-    void start(quintptr c2hHandleValue,
+    void start(qulonglong c2hHandleValue,
                int frameBytes,
                int chunkBytes,
                int throttleMs,

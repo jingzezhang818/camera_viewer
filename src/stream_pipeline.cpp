@@ -94,6 +94,55 @@ QByteArray packetizeBytes(const QByteArray &raw)
 }
 
 /**
+ * @brief 按新协议构造单个固定 1024B 包，length 表示整包长度。
+ */
+QByteArray buildTotalLengthProtocolPacket(const QByteArray &payload)
+{
+    const int payloadLen = qBound(0, payload.size(), VideoPacketParser::kPayloadSize);
+    QByteArray packet(VideoPacketParser::kPacketSize, '\0');
+
+    packet[0] = static_cast<char>(VideoPacketParser::kSync0);
+    packet[1] = static_cast<char>(VideoPacketParser::kSync1);
+    packet[2] = static_cast<char>((VideoPacketParser::kPacketSize >> 8) & 0xFF);
+    packet[3] = static_cast<char>(VideoPacketParser::kPacketSize & 0xFF);
+
+    const char dest[6] = {0x00, 0x00, 0x00, 0x10, 0x20, 0x05};
+    const char source[6] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
+    const char priority[2] = {0x00, 0x01};
+    std::memcpy(packet.data() + 4, dest, sizeof(dest));
+    std::memcpy(packet.data() + 10, source, sizeof(source));
+    std::memcpy(packet.data() + 16, priority, sizeof(priority));
+
+    if (payloadLen > 0) {
+        std::memcpy(packet.data() + VideoPacketParser::kHeaderSize,
+                    payload.constData(),
+                    static_cast<size_t>(payloadLen));
+    }
+
+    return packet;
+}
+
+QByteArray packetizeFrameAlignedTotalLength(const QByteArray &raw, int frameBytes)
+{
+    QByteArray packed;
+    if (frameBytes <= 0) {
+        return packed;
+    }
+
+    for (int frameOffset = 0; frameOffset < raw.size(); frameOffset += frameBytes) {
+        const QByteArray frame = raw.mid(frameOffset, qMin(frameBytes, raw.size() - frameOffset));
+        int offset = 0;
+        while (offset < frame.size()) {
+            const int n = qMin(VideoPacketParser::kPayloadSize, frame.size() - offset);
+            packed.append(buildTotalLengthProtocolPacket(frame.mid(offset, n)));
+            offset += n;
+        }
+    }
+
+    return packed;
+}
+
+/**
  * @brief 按给定模式分段切分输入字节流。
  *
  * 例如 pattern=[300,500,1] 时，会循环按 300/500/1 字节切分，
@@ -255,14 +304,29 @@ VideoPacketParser::Status VideoPacketParser::parsePacket(const char *packet,
         return Status::SyncMismatch;
     }
 
-    // length 取值范围必须落在 [0,1006]。
-    const int payloadLength = (static_cast<int>(bytes[2]) << 8) | static_cast<int>(bytes[3]);
+    // 新协议中 length 表示整包长度，发送端固定填 0x0400。
+    // 兼容旧协议：当 length <= payload 区大小时，仍按 payload 有效长度解释。
+    const int lengthField = (static_cast<int>(bytes[2]) << 8) | static_cast<int>(bytes[3]);
+    int payloadLength = 0;
+    bool lengthIncludesHeader = false;
+    if (lengthField > kPayloadSize) {
+        if (lengthField < kHeaderSize || lengthField > kPacketSize) {
+            return Status::InvalidLength;
+        }
+        payloadLength = lengthField - kHeaderSize;
+        lengthIncludesHeader = true;
+    } else {
+        payloadLength = lengthField;
+    }
+
     if (payloadLength < 0 || payloadLength > kPayloadSize) {
         return Status::InvalidLength;
     }
 
-    // 只拷贝 length 指定的真实字节，不把 padding 0 带入输出。
+    // 旧协议可直接按 payload 有效长度截断；新协议先取完整 payload 区，
+    // 帧完成后的包尾 padding 由组帧阶段按帧边界丢弃。
     outPacket.payloadLength = payloadLength;
+    outPacket.lengthIncludesHeader = lengthIncludesHeader;
     if (payloadLength > 0) {
         outPacket.payload = QByteArray(packet + kHeaderSize, payloadLength);
     }
@@ -312,10 +376,12 @@ StreamDepacketizer::BatchResult StreamDepacketizer::pushBytes(const char *data, 
 
         if (status == VideoPacketParser::Status::Ok) {
             // 成功：收集真实 payload，并弹出整包 1024B。
+            result.packetPayloads.push_back(packet.payload);
             if (packet.payloadLength > 0) {
                 result.restoredBytes.append(packet.payload);
             }
             result.packetLengths.push_back(packet.payloadLength);
+            result.packetLengthIncludesHeader.push_back(packet.lengthIncludesHeader);
             ++result.parsedPackets;
             m_cache.remove(0, VideoPacketParser::kPacketSize);
             continue;
@@ -487,6 +553,40 @@ FrameAssembler::BatchResult FrameAssembler::pushBytes(const char *data, int size
     return result;
 }
 
+FrameAssembler::BatchResult FrameAssembler::pushPacketPayload(const QByteArray &bytes)
+{
+    BatchResult result;
+    if (bytes.isEmpty()) {
+        result.frameCacheBytes = m_cache.size();
+        result.totalInputBytes = m_totalInputBytes;
+        result.totalFramesOutput = m_totalFramesOutput;
+        return result;
+    }
+
+    result.inputBytes = bytes.size();
+    m_totalInputBytes += bytes.size();
+
+    if (m_frameBytes <= 0) {
+        m_cache.append(bytes);
+    } else {
+        const int needed = m_frameBytes - m_cache.size();
+        if (needed > 0 && bytes.size() >= needed) {
+            m_cache.append(bytes.constData(), needed);
+            result.frames.push_back(m_cache.left(m_frameBytes));
+            m_cache.clear();
+            ++result.framesOutput;
+            ++m_totalFramesOutput;
+        } else {
+            m_cache.append(bytes);
+        }
+    }
+
+    result.frameCacheBytes = m_cache.size();
+    result.totalInputBytes = m_totalInputBytes;
+    result.totalFramesOutput = m_totalFramesOutput;
+    return result;
+}
+
 void FrameAssembler::reset()
 {
     m_cache.clear();
@@ -523,6 +623,20 @@ int Yuy2FrameReassembler::bufferedBytes() const
 Yuy2FrameReassembler::BatchResult Yuy2FrameReassembler::pushBytes(const QByteArray &bytes)
 {
     const FrameAssembler::BatchResult baseResult = m_assembler.pushBytes(bytes);
+
+    BatchResult result;
+    result.frames = baseResult.frames;
+    result.inputBytes = baseResult.inputBytes;
+    result.frameCacheBytes = baseResult.frameCacheBytes;
+    result.framesOutput = baseResult.framesOutput;
+    result.totalInputBytes = baseResult.totalInputBytes;
+    result.totalFramesOutput = baseResult.totalFramesOutput;
+    return result;
+}
+
+Yuy2FrameReassembler::BatchResult Yuy2FrameReassembler::pushPacketPayload(const QByteArray &bytes)
+{
+    const FrameAssembler::BatchResult baseResult = m_assembler.pushPacketPayload(bytes);
 
     BatchResult result;
     result.frames = baseResult.frames;
@@ -694,6 +808,44 @@ StreamPipelineSelfTestReport runStreamPipelineSelfTests(const VideoStreamConfig 
                       .arg(source6.size())
                       .arg(emittedFrames6)
                       .arg(reassembler6.bufferedBytes()));
+
+    // 用例7：新协议 length=0x0400（整包长度），按帧补齐包尾 padding。
+    const QByteArray source7 = makePatternBytes(config.frameBytes * 2, 7);
+    const QByteArray encoded7 = packetizeFrameAlignedTotalLength(source7, config.frameBytes);
+    StreamDepacketizer dep7;
+    Yuy2FrameReassembler reassembler7(config);
+    QVector<QByteArray> frames7;
+    const QVector<QByteArray> encodedChunks7 = splitBytesByPattern(encoded7, splitPattern);
+    for (const QByteArray &chunk : encodedChunks7) {
+        const StreamDepacketizer::BatchResult dep = dep7.pushBytes(chunk);
+        for (int i = 0; i < dep.packetPayloads.size(); ++i) {
+            const bool lengthIncludesHeader = i < dep.packetLengthIncludesHeader.size()
+                && dep.packetLengthIncludesHeader[i];
+            const Yuy2FrameReassembler::BatchResult frame = lengthIncludesHeader
+                ? reassembler7.pushPacketPayload(dep.packetPayloads[i])
+                : reassembler7.pushBytes(dep.packetPayloads[i]);
+            for (const QByteArray &payload : frame.frames) {
+                frames7.push_back(payload);
+            }
+        }
+    }
+
+    bool totalLengthFramesMatch = frames7.size() == 2;
+    if (totalLengthFramesMatch) {
+        for (int i = 0; i < frames7.size(); ++i) {
+            if (frames7[i] != source7.mid(i * config.frameBytes, config.frameBytes)) {
+                totalLengthFramesMatch = false;
+                break;
+            }
+        }
+    }
+    addCaseResult(report,
+                  "total_length_0x0400_frame_aligned",
+                  totalLengthFramesMatch && reassembler7.bufferedBytes() == 0,
+                  QString("encoded=%1 frames=%2 cache=%3")
+                      .arg(encoded7.size())
+                      .arg(frames7.size())
+                      .arg(reassembler7.bufferedBytes()));
 
     return report;
 }

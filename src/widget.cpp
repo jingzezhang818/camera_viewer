@@ -16,6 +16,8 @@
 
 #include <limits>
 #include <vector>
+#include <cerrno>
+#include <cstring>
 
 #include "stream_pipeline.h"
 #include "xdmaDLL_public_linux.h"
@@ -78,7 +80,7 @@ void C2hReaderWorker::requestStop()
     m_running.store(false);
 }
 
-void C2hReaderWorker::start(quintptr c2hHandleValue,
+void C2hReaderWorker::start(qulonglong c2hHandleValue,
                             int frameBytes,
                             int chunkBytes,
                             int throttleMs,
@@ -92,7 +94,7 @@ void C2hReaderWorker::start(quintptr c2hHandleValue,
     }
 
     // 先校验输入参数，避免进入读取循环后再失败。
-    const HANDLE sourceHandle = reinterpret_cast<HANDLE>(c2hHandleValue);
+    const HANDLE sourceHandle = reinterpret_cast<HANDLE>(static_cast<quintptr>(c2hHandleValue));
     const VideoStreamConfig streamConfig = VideoStreamConfig::createYuy2(width, height);
     if (!isValidHandle(sourceHandle) || frameBytes <= 0 || !streamConfig.isValid()) {
         m_running.store(false);
@@ -147,6 +149,22 @@ void C2hReaderWorker::start(quintptr c2hHandleValue,
                        .arg(streamConfig.frameBytes)
                        .arg(safeChunkBytes));
 
+    // 抓取“原始 read 数据”与“最终解包帧数据”（与 UI 显示同源），用于对比分析。
+    const QString captureTs = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz");
+    const QString rawCapturePath = QString("c2h_rx_raw_%1.bin").arg(captureTs);
+    const QString unpackedCapturePath = QString("c2h_rx_unpacked_%1.bin").arg(captureTs);
+    QFile rawCaptureFile(rawCapturePath);
+    QFile unpackedCaptureFile(unpackedCapturePath);
+    const bool rawCaptureEnabled = rawCaptureFile.open(QIODevice::WriteOnly);
+    const bool unpackedCaptureEnabled = unpackedCaptureFile.open(QIODevice::WriteOnly);
+    emit workerLog(rawCaptureEnabled
+                       ? QString("[INFO] RX raw capture -> %1").arg(QFileInfo(rawCaptureFile).absoluteFilePath())
+                       : QString("[WARN] RX raw capture open failed: %1").arg(rawCapturePath));
+    emit workerLog(unpackedCaptureEnabled
+                       ? QString("[INFO] RX unpacked capture -> %1")
+                             .arg(QFileInfo(unpackedCaptureFile).absoluteFilePath())
+                       : QString("[WARN] RX unpacked capture open failed: %1").arg(unpackedCapturePath));
+
     // 构建两级处理模块：协议解包 + 固定帧长重组。
     StreamDepacketizer depacketizer;
     Yuy2FrameReassembler frameReassembler(streamConfig);
@@ -156,18 +174,43 @@ void C2hReaderWorker::start(quintptr c2hHandleValue,
     // 2) depacketizer 恢复真实视频字节流
     // 3) reassembler 按 frameBytes 输出完整帧
     while (m_running.load()) {
-        const int ret = read_device(c2h, 0x00000000, static_cast<DWORD>(safeChunkBytes), chunkBuffer);
+        const int ret = read_device_allow_partial(c2h, 0x00000000, static_cast<DWORD>(safeChunkBytes), chunkBuffer);
+        const int ioErrno = (ret < 0) ? errno : 0;
         if (!m_running.load()) {
             break;
         }
 
-        if (ret <= 0) {
-            emit readError(ret);
+        if (ret == 0) {
+            // 没有数据时保持监听，不触发停止流程。
+            QThread::msleep(static_cast<unsigned long>(kReaderErrorBackoffMs));
+            continue;
+        }
+
+        if (ret < 0) {
+            // 读取异常时进入退避重试，保持通道持续监听。
+            const QString errText = (ioErrno > 0) ? QString::fromLocal8Bit(std::strerror(ioErrno)) : QString("unknown");
+            emit workerLog(QString("[WARN] C2H read returned %1 (errno=%2, %3), keep listening...")
+                               .arg(ret)
+                               .arg(ioErrno)
+                               .arg(errText));
             QThread::msleep(static_cast<unsigned long>(kReaderErrorBackoffMs));
             continue;
         }
 
         const QByteArray incoming(reinterpret_cast<const char *>(chunkBuffer), ret);
+        if (rawCaptureEnabled) {
+            const qint64 rawWritten = rawCaptureFile.write(incoming);
+            if (rawWritten != incoming.size()) {
+                emit workerLog(QString("[WARN] RX raw capture write short: expect=%1 actual=%2")
+                                   .arg(incoming.size())
+                                   .arg(rawWritten));
+            }
+        }
+        if (ret < safeChunkBytes) {
+            emit workerLog(QString("[RX] short read=%1B (< request %2B), accepted for stream mode")
+                               .arg(ret)
+                               .arg(safeChunkBytes));
+        }
         emit workerLog(QString("[RX] received=%1B").arg(ret));
 
         const StreamDepacketizer::BatchResult dep = depacketizer.pushBytes(incoming);
@@ -191,8 +234,19 @@ void C2hReaderWorker::start(quintptr c2hHandleValue,
         if (!dep.resyncPositions.isEmpty()) {
             emit workerLog(QString("[PROTO] resync_positions=%1").arg(joinIntValues(dep.resyncPositions)));
         }
+        if (unpackedCaptureEnabled && !dep.restoredBytes.isEmpty()) {
+            const qint64 unpackedWritten = unpackedCaptureFile.write(dep.restoredBytes);
+            if (unpackedWritten != dep.restoredBytes.size()) {
+                emit workerLog(QString("[WARN] RX unpacked capture write short: expect=%1 actual=%2")
+                                   .arg(dep.restoredBytes.size())
+                                   .arg(unpackedWritten));
+            }
+        }
 
+        // length 固定 0x400 时无法从包头获得真实有效长度，
+        // 因此按连续字节流组帧，不再依赖包内有效长度语义。
         const Yuy2FrameReassembler::BatchResult frameBatch = frameReassembler.pushBytes(dep.restoredBytes);
+
         emit workerLog(QString("[FRAME] cache=%1B output_frames+%2(total=%3)")
                            .arg(frameBatch.frameCacheBytes)
                            .arg(frameBatch.framesOutput)
@@ -210,6 +264,14 @@ void C2hReaderWorker::start(quintptr c2hHandleValue,
     }
 
     // 统一资源回收出口。
+    if (rawCaptureEnabled) {
+        rawCaptureFile.flush();
+        rawCaptureFile.close();
+    }
+    if (unpackedCaptureEnabled) {
+        unpackedCaptureFile.flush();
+        unpackedCaptureFile.close();
+    }
     free_buffer(chunkBuffer);
     CloseHandle(c2h);
     m_running.store(false);
@@ -428,11 +490,11 @@ void Widget::on_btnStartReceive_clicked()
                   .arg(throttleMs));
 
     // 使用 QueuedConnection 保证 start() 在 worker 所在线程执行。
-    const quintptr handleValue = reinterpret_cast<quintptr>(m_c2h0Handle);
+    const qulonglong handleValue = static_cast<qulonglong>(reinterpret_cast<quintptr>(m_c2h0Handle));
     const bool invokeOk = QMetaObject::invokeMethod(m_readerWorker,
                                                      "start",
                                                      Qt::QueuedConnection,
-                                                     Q_ARG(quintptr, handleValue),
+                                                     Q_ARG(qulonglong, handleValue),
                                                      Q_ARG(int, frameBytes),
                                                      Q_ARG(int, chunkBytes),
                                                      Q_ARG(int, throttleMs),
