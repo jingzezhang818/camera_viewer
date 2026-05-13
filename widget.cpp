@@ -123,6 +123,7 @@ void C2hReaderWorker::requestStop()
     m_running.store(false);
 }
 
+#if 0
 void C2hReaderWorker::start(quintptr c2hHandleValue,
                             int frameBytes,
                             int chunkBytes,
@@ -336,6 +337,286 @@ void C2hReaderWorker::start(quintptr c2hHandleValue,
     }
 
     // 统一资源回收出口。
+    free_buffer(chunkBuffer);
+    CloseHandle(c2h);
+    m_running.store(false);
+    emit stopped();
+}
+#endif
+
+void C2hReaderWorker::start(quintptr c2hHandleValue,
+                            int frameBytes,
+                            int chunkBytes,
+                            int throttleMs,
+                            int width,
+                            int height,
+                            QString rawDumpPath)
+{
+    if (m_running.exchange(true)) {
+        emit readError(-2001);
+        return;
+    }
+
+    const HANDLE sourceHandle = reinterpret_cast<HANDLE>(c2hHandleValue);
+    const VideoStreamConfig streamConfig = VideoStreamConfig::createYuy2(width, height);
+    if (!isValidHandle(sourceHandle) || frameBytes <= 0 || !streamConfig.isValid()) {
+        m_running.store(false);
+        emit readError(-2002);
+        emit stopped();
+        return;
+    }
+
+    if (frameBytes != streamConfig.frameBytes) {
+        emit workerLog(QString("[WARN] frameBytes mismatch: arg=%1, config=%2")
+                           .arg(frameBytes)
+                           .arg(streamConfig.frameBytes));
+    }
+
+    HANDLE c2h = INVALID_HANDLE_VALUE;
+    if (!DuplicateHandle(GetCurrentProcess(),
+                         sourceHandle,
+                         GetCurrentProcess(),
+                         &c2h,
+                         0,
+                         FALSE,
+                         DUPLICATE_SAME_ACCESS)
+        || !isValidHandle(c2h)) {
+        m_running.store(false);
+        emit readError(-2004);
+        emit stopped();
+        return;
+    }
+
+    const int safeChunkBytes = qBound(kMinReadChunkBytes, chunkBytes, kMaxReadChunkBytes);
+    BYTE *chunkBuffer = allocate_buffer(static_cast<size_t>(safeChunkBytes), 0);
+    if (!chunkBuffer) {
+        CloseHandle(c2h);
+        m_running.store(false);
+        emit readError(-2003);
+        emit stopped();
+        return;
+    }
+
+    constexpr bool kLowLatencyMode = false;
+    constexpr int kLowLatencyKeepFrames = 2;
+    constexpr qint64 kStatsPeriodMs = 1000;
+    constexpr qint64 kUnsyncWarnPeriodMs = 2000;
+    constexpr int kUnsyncWarnStreakThreshold = 20;
+
+    emit workerLog(QString("[INFO] Reader pipeline: packet=%1B header=%2B payload=%3B "
+                           "lengthField=fixed_0x0400 frameBytes=%4 chunk=%5B mode=%6")
+                       .arg(VideoPacketParser::kPacketSize)
+                       .arg(VideoPacketParser::kHeaderSize)
+                       .arg(VideoPacketParser::kPayloadSize)
+                       .arg(streamConfig.frameBytes)
+                       .arg(safeChunkBytes)
+                       .arg(kLowLatencyMode ? "low_latency" : "integrity"));
+
+    QFile rawDumpFile;
+    QFile depacketizedDumpFile;
+    QString depacketizedDumpPath;
+    qint64 rawDumpBytes = 0;
+    int rawDumpChunks = 0;
+    qint64 depacketizedDumpBytes = 0;
+    int depacketizedDumpChunks = 0;
+    if (!rawDumpPath.isEmpty()) {
+        rawDumpFile.setFileName(rawDumpPath);
+        if (!rawDumpFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            free_buffer(chunkBuffer);
+            CloseHandle(c2h);
+            m_running.store(false);
+            emit workerLog(QString("[ERROR] Open raw C2H dump file failed: %1").arg(rawDumpPath));
+            emit readError(-2005);
+            emit stopped();
+            return;
+        }
+        emit workerLog(QString("[INFO] Raw C2H dump started: %1").arg(rawDumpPath));
+
+        const QFileInfo rawInfo(rawDumpPath);
+        depacketizedDumpPath = rawInfo.dir().filePath(
+            QString("%1_depacketized.bin").arg(rawInfo.completeBaseName()));
+        depacketizedDumpFile.setFileName(depacketizedDumpPath);
+        if (!depacketizedDumpFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            rawDumpFile.close();
+            free_buffer(chunkBuffer);
+            CloseHandle(c2h);
+            m_running.store(false);
+            emit workerLog(QString("[ERROR] Open depacketized dump file failed: %1")
+                               .arg(depacketizedDumpPath));
+            emit readError(-2007);
+            emit stopped();
+            return;
+        }
+        emit workerLog(QString("[INFO] Depacketized dump started: %1").arg(depacketizedDumpPath));
+    }
+
+    StreamDepacketizer depacketizer;
+    depacketizer.reset();
+    QByteArray imageStreamBuffer;
+    imageStreamBuffer.reserve(streamConfig.frameBytes * 2);
+    imageStreamBuffer.clear();
+
+    qint64 totalRxBytes = 0;
+    qint64 validPacketCount = 0;
+    qint64 invalidHeaderCount = 0;
+    qint64 invalidLengthCount = 0;
+    qint64 resyncCount = 0;
+    qint64 droppedBytes = 0;
+    qint64 outputFrameCount = 0;
+
+    int unsyncStreak = 0;
+    int windowOutputFrames = 0;
+    qint64 statsWindowStartMs = QDateTime::currentMSecsSinceEpoch();
+    qint64 lastUnsyncWarnMs = 0;
+
+    while (m_running.load()) {
+        const int ret = read_device(c2h, 0x00000000, static_cast<DWORD>(safeChunkBytes), chunkBuffer);
+        if (!m_running.load()) {
+            break;
+        }
+
+        if (ret == 0) {
+            QThread::msleep(static_cast<unsigned long>(kReaderErrorBackoffMs));
+            continue;
+        }
+        if (ret < 0) {
+            emit readError(ret);
+            QThread::msleep(static_cast<unsigned long>(kReaderErrorBackoffMs));
+            continue;
+        }
+
+        const QByteArray incoming(reinterpret_cast<const char *>(chunkBuffer), ret);
+        totalRxBytes += incoming.size();
+
+        if (rawDumpFile.isOpen()) {
+            const qint64 written = rawDumpFile.write(incoming);
+            if (written != incoming.size()) {
+                emit workerLog(QString("[ERROR] Raw C2H dump write failed: expected=%1B written=%2B")
+                                   .arg(incoming.size())
+                                   .arg(written));
+                emit readError(-2006);
+                break;
+            }
+            rawDumpBytes += written;
+            ++rawDumpChunks;
+        }
+
+        const StreamDepacketizer::BatchResult dep = depacketizer.pushBytes(incoming);
+        validPacketCount += dep.parsedPackets;
+        invalidHeaderCount += dep.syncMismatchCount;
+        invalidLengthCount += dep.invalidLengthCount;
+        resyncCount += dep.resyncCount;
+
+        int droppedByResync = 0;
+        for (const int pos : dep.resyncPositions) {
+            if (pos > 0) {
+                droppedByResync += pos;
+            }
+        }
+        droppedBytes += droppedByResync;
+
+        if (depacketizedDumpFile.isOpen() && !dep.restoredBytes.isEmpty()) {
+            const qint64 written = depacketizedDumpFile.write(dep.restoredBytes);
+            if (written != dep.restoredBytes.size()) {
+                emit workerLog(QString("[ERROR] Depacketized dump write failed: expected=%1B written=%2B")
+                                   .arg(dep.restoredBytes.size())
+                                   .arg(written));
+                emit readError(-2008);
+                break;
+            }
+            depacketizedDumpBytes += written;
+            ++depacketizedDumpChunks;
+        }
+
+        imageStreamBuffer.append(dep.restoredBytes);
+
+        if (kLowLatencyMode && streamConfig.frameBytes > 0) {
+            const int maxBufferedBytes = streamConfig.frameBytes * kLowLatencyKeepFrames;
+            if (imageStreamBuffer.size() > maxBufferedBytes) {
+                int drop = imageStreamBuffer.size() - maxBufferedBytes;
+                drop = (drop / streamConfig.frameBytes) * streamConfig.frameBytes;
+                if (drop > 0) {
+                    imageStreamBuffer.remove(0, drop);
+                    droppedBytes += drop;
+                }
+            }
+        }
+
+        int framesOutputThisBatch = 0;
+        while (imageStreamBuffer.size() >= streamConfig.frameBytes) {
+            const QByteArray frame = imageStreamBuffer.left(streamConfig.frameBytes);
+            imageStreamBuffer.remove(0, streamConfig.frameBytes);
+            emit frameReady(frame, streamConfig.width, streamConfig.height);
+            ++framesOutputThisBatch;
+            ++outputFrameCount;
+            ++windowOutputFrames;
+        }
+
+        if (dep.parsedPackets > 0) {
+            unsyncStreak = 0;
+        } else if (dep.syncMismatchCount > 0 || dep.invalidLengthCount > 0) {
+            ++unsyncStreak;
+        }
+
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        if (unsyncStreak >= kUnsyncWarnStreakThreshold && nowMs - lastUnsyncWarnMs >= kUnsyncWarnPeriodMs) {
+            emit workerLog(QString("[WARN] Long unsynced stream: streak=%1 cache=%2B")
+                               .arg(unsyncStreak)
+                               .arg(dep.protocolCacheBytes));
+            lastUnsyncWarnMs = nowMs;
+        }
+
+        if (!dep.packetLengths.isEmpty()) {
+            emit workerLog(QString("[PROTO] packet_lengths {%1}")
+                               .arg(summarizeIntSeries(dep.packetLengths)));
+        }
+        if (!dep.resyncPositions.isEmpty()) {
+            emit workerLog(QString("[PROTO] resync_positions {%1}")
+                               .arg(summarizeIntSeries(dep.resyncPositions)));
+        }
+
+        if (nowMs - statsWindowStartMs >= kStatsPeriodMs) {
+            const qint64 elapsedMs = qMax<qint64>(1, nowMs - statsWindowStartMs);
+            const double displayFps = static_cast<double>(windowOutputFrames) * 1000.0
+                / static_cast<double>(elapsedMs);
+            emit workerLog(QString("[STAT] totalRxBytes=%1 validPacketCount=%2 invalidHeaderCount=%3 "
+                                   "invalidLengthCount=%4 resyncCount=%5 droppedBytes=%6 "
+                                   "imageStreamBuffer=%7B outputFrameCount=%8 displayFps=%9")
+                               .arg(totalRxBytes)
+                               .arg(validPacketCount)
+                               .arg(invalidHeaderCount)
+                               .arg(invalidLengthCount)
+                               .arg(resyncCount)
+                               .arg(droppedBytes)
+                               .arg(imageStreamBuffer.size())
+                               .arg(outputFrameCount)
+                               .arg(displayFps, 0, 'f', 2));
+            statsWindowStartMs = nowMs;
+            windowOutputFrames = 0;
+        }
+
+        if (throttleMs > 0 && framesOutputThisBatch > 0) {
+            QThread::msleep(static_cast<unsigned long>(throttleMs));
+        }
+    }
+
+    if (rawDumpFile.isOpen()) {
+        rawDumpFile.flush();
+        rawDumpFile.close();
+        emit workerLog(QString("[INFO] Raw C2H dump saved: %1, chunks=%2, bytes=%3")
+                           .arg(rawDumpPath)
+                           .arg(rawDumpChunks)
+                           .arg(rawDumpBytes));
+    }
+    if (depacketizedDumpFile.isOpen()) {
+        depacketizedDumpFile.flush();
+        depacketizedDumpFile.close();
+        emit workerLog(QString("[INFO] Depacketized dump saved: %1, chunks=%2, bytes=%3")
+                           .arg(depacketizedDumpPath)
+                           .arg(depacketizedDumpChunks)
+                           .arg(depacketizedDumpBytes));
+    }
+
     free_buffer(chunkBuffer);
     CloseHandle(c2h);
     m_running.store(false);
@@ -1131,4 +1412,3 @@ void Widget::appendLog(const QString &text)
     const QString stamp = QDateTime::currentDateTime().toString("hh:mm:ss.zzz");
     ui->plainTextEdit->appendPlainText(QString("[%1] %2").arg(stamp, text));
 }
-

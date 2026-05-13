@@ -50,7 +50,7 @@ QByteArray makePatternBytes(int size, int seed)
 QByteArray buildProtocolPacket(const QByteArray &payload)
 {
     const int payloadLen = qBound(0, payload.size(), VideoPacketParser::kPayloadSize);
-    const int totalLength = VideoPacketParser::kHeaderSize + payloadLen;
+    const int totalLength = VideoPacketParser::kPacketSize;
     QByteArray packet(VideoPacketParser::kPacketSize, '\0');
 
     // 固定协议头。
@@ -85,8 +85,8 @@ QByteArray packetizeBytes(const QByteArray &raw)
     QByteArray packed;
     int offset = 0;
 
-    while (offset < raw.size()) {
-        const int n = qMin(VideoPacketParser::kPayloadSize, raw.size() - offset);
+    while (offset + VideoPacketParser::kPayloadSize <= raw.size()) {
+        const int n = VideoPacketParser::kPayloadSize;
         packed.append(buildProtocolPacket(raw.mid(offset, n)));
         offset += n;
     }
@@ -256,18 +256,14 @@ VideoPacketParser::Status VideoPacketParser::parsePacket(const char *packet,
         return Status::SyncMismatch;
     }
 
-    // length is the total bytes in this packet: header + valid payload.
+    // length is fixed by protocol to 0x0400 (1024 bytes).
     const int totalLength = (static_cast<int>(bytes[2]) << 8) | static_cast<int>(bytes[3]);
-    if (totalLength < kHeaderSize || totalLength > kPacketSize) {
+    if (totalLength != kPacketSize) {
         return Status::InvalidLength;
     }
 
-    // Only extract valid payload bytes; ignore trailing zero padding.
-    const int payloadLength = totalLength - kHeaderSize;
-    outPacket.payloadLength = payloadLength;
-    if (payloadLength > 0) {
-        outPacket.payload = QByteArray(packet + kHeaderSize, payloadLength);
-    }
+    outPacket.payloadLength = kPayloadSize;
+    outPacket.payload = QByteArray(packet + kHeaderSize, kPayloadSize);
 
     return Status::Ok;
 }
@@ -566,13 +562,12 @@ StreamPipelineSelfTestReport runStreamPipelineSelfTests(const VideoStreamConfig 
     const QVector<int> splitPattern = {300, 500, 700, 2048, 1, 4096};
 
     // 用例1：单次输入，验证解包后字节流与原始流完全一致。
-    const QByteArray source1 = makePatternBytes(VideoPacketParser::kPayloadSize * 3 + 517, 1);
+    const QByteArray source1 = makePatternBytes(VideoPacketParser::kPayloadSize * 3, 1);
     const QByteArray encoded1 = packetizeBytes(source1);
     StreamDepacketizer dep1;
     const StreamDepacketizer::BatchResult dep1Result = dep1.pushBytes(encoded1);
     const bool dep1Pass = dep1Result.restoredBytes == source1
-        && dep1Result.parsedPackets == ((source1.size() + VideoPacketParser::kPayloadSize - 1)
-                                        / VideoPacketParser::kPayloadSize);
+        && dep1Result.parsedPackets == (source1.size() / VideoPacketParser::kPayloadSize);
     addCaseResult(report,
                   "depacketize_single_chunk",
                   dep1Pass,
@@ -598,7 +593,7 @@ StreamPipelineSelfTestReport runStreamPipelineSelfTests(const VideoStreamConfig 
                       .arg(source1.size()));
 
     // 用例3：padding 零字节不进入恢复后的真实流。
-    const QByteArray source3 = makePatternBytes(VideoPacketParser::kPayloadSize + 7, 2);
+    const QByteArray source3 = makePatternBytes(VideoPacketParser::kPayloadSize, 2);
     const QByteArray encoded3 = packetizeBytes(source3);
     StreamDepacketizer dep3;
     const QByteArray restored3 = dep3.pushBytes(encoded3).restoredBytes;
@@ -640,8 +635,8 @@ StreamPipelineSelfTestReport runStreamPipelineSelfTests(const VideoStreamConfig 
                       .arg(config.frameBytes));
 
     // 用例5：sync 错位 + 非法 length 重同步。
-    const QByteArray source5a = makePatternBytes(300, 4);
-    const QByteArray source5b = makePatternBytes(128, 5);
+    const QByteArray source5a = makePatternBytes(VideoPacketParser::kPayloadSize, 4);
+    const QByteArray source5b = makePatternBytes(VideoPacketParser::kPayloadSize, 5);
     QByteArray invalidPacket(VideoPacketParser::kPacketSize, '\0');
     invalidPacket[0] = static_cast<char>(VideoPacketParser::kSync0);
     invalidPacket[1] = static_cast<char>(VideoPacketParser::kSync1);
@@ -688,14 +683,23 @@ StreamPipelineSelfTestReport runStreamPipelineSelfTests(const VideoStreamConfig 
         emittedFrames6 += frame.framesOutput;
     }
 
+    const int validBytes6 = (source6.size() / VideoPacketParser::kPayloadSize)
+        * VideoPacketParser::kPayloadSize;
+    const QByteArray expected6 = source6.left(validBytes6);
+    const int expectedFrames6 = validBytes6 / config.frameBytes;
+    const int expectedCache6 = validBytes6 % config.frameBytes;
+
     addCaseResult(report,
                   "end_to_end_segmented_pipeline",
-                  restored6 == source6 && emittedFrames6 == 2 && reassembler6.bufferedBytes() == 999,
-                  QString("restored=%1 expected=%2 frames=%3 cache=%4")
+                  restored6 == expected6 && emittedFrames6 == expectedFrames6
+                      && reassembler6.bufferedBytes() == expectedCache6,
+                  QString("restored=%1 expected=%2 frames=%3 expectedFrames=%4 cache=%5 expectedCache=%6")
                       .arg(restored6.size())
-                      .arg(source6.size())
+                      .arg(expected6.size())
                       .arg(emittedFrames6)
-                      .arg(reassembler6.bufferedBytes()));
+                      .arg(expectedFrames6)
+                      .arg(reassembler6.bufferedBytes())
+                      .arg(expectedCache6));
 
     return report;
 }

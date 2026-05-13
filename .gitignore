@@ -1,0 +1,36 @@
+﻿# Qt / qmake user-local files
+*.pro.user
+*.pro.user.*
+.qmake.stash
+
+# Build directories and generated artifacts
+debug/
+release/
+*.obj
+*.o
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.lib
+*.dll
+*.exe
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+
+# Generated Makefiles
+Makefile
+Makefile.Debug
+Makefile.Release
+
+# Runtime capture dumps
+c2h_dump_*.yuv
+c2h_raw_*.bin
+frame_*.raw
+
+# Local snapshots / scratch files
+*_snapshot.cpp
+
+# Codex local metadata
+.codex/
