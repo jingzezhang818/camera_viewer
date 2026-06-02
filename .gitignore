@@ -27,7 +27,9 @@ Makefile.Release
 # Runtime capture dumps
 c2h_dump_*.yuv
 c2h_raw_*.bin
+c2h_raw_*.yuv
 frame_*.raw
+log.txt
 
 # Local snapshots / scratch files
 *_snapshot.cpp
