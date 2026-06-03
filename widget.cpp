@@ -769,8 +769,17 @@ void Widget::on_btnOpenXdma_clicked()
 void Widget::on_btnRunSelfTest_clicked()
 {
     // 自测只依赖 stream_pipeline，不依赖 XDMA 设备是否打开。
-    const VideoStreamConfig config = VideoStreamConfig::defaultYuy2();
-    appendLog(QString("[SELFTEST] Start: %1").arg(config.toString()));
+    const int width = ui->spinWidth->value();
+    const int height = ui->spinHeight->value();
+    const VideoStreamConfig config = VideoStreamConfig::createYuy2(width, height);
+    if (!config.isValid()) {
+        appendLog(QString("[SELFTEST] Invalid manual YUYV config: %1x%2")
+                      .arg(width)
+                      .arg(height));
+        return;
+    }
+
+    appendLog(QString("[SELFTEST] Start with manual YUYV config: %1").arg(config.toString()));
 
     const StreamPipelineSelfTestReport report = runStreamPipelineSelfTests(config);
     for (const QString &line : report.logs) {
@@ -790,10 +799,13 @@ void Widget::on_btnStartReceive_clicked()
         return;
     }
 
-    // 当前接收端使用固定参数（640x360 YUY2），帧边界由固定 frameBytes 决定。
-    const VideoStreamConfig streamConfig = VideoStreamConfig::defaultYuy2();
+    const int width = ui->spinWidth->value();
+    const int height = ui->spinHeight->value();
+    const VideoStreamConfig streamConfig = VideoStreamConfig::createYuy2(width, height);
     if (!streamConfig.isValid()) {
-        appendLog("[ERROR] Internal stream config is invalid.");
+        appendLog(QString("[ERROR] Invalid manual YUYV config: %1x%2")
+                      .arg(width)
+                      .arg(height));
         return;
     }
 
@@ -804,22 +816,9 @@ void Widget::on_btnStartReceive_clicked()
         return;
     }
 
-    const int width = streamConfig.width;
-    const int height = streamConfig.height;
     const int frameBytes = streamConfig.frameBytes;
     const int chunkBytes = static_cast<int>(chunkBytes64);
     const int throttleMs = ui->spinThrottleMs->value();
-
-    // 将 UI 中宽高同步为固定配置，避免用户误以为当前读取按 UI 宽高生效。
-    if (ui->spinWidth->value() != width || ui->spinHeight->value() != height) {
-        appendLog(QString("[WARN] UI resolution overridden by fixed stream config: %1x%2 -> %3x%4")
-                      .arg(ui->spinWidth->value())
-                      .arg(ui->spinHeight->value())
-                      .arg(width)
-                      .arg(height));
-    }
-    ui->spinWidth->setValue(width);
-    ui->spinHeight->setValue(height);
 
     if (!startVideoDump(width, height)) {
         appendLog("[ERROR] Cannot start receive because dump file is unavailable.");
@@ -839,8 +838,10 @@ void Widget::on_btnStartReceive_clicked()
     m_receivedFrames = 0;
     setReceivingUiState(true);
 
-    appendLog(QString("[INFO] Start C2H receive with fixed config: %1, chunk=%2KB(%3B), throttle=%4ms")
-                  .arg(streamConfig.toString())
+    appendLog(QString("[INFO] Start C2H receive with manual YUYV config: %1x%2, frameBytes=%3, chunk=%4KB(%5B), throttle=%6ms")
+                  .arg(width)
+                  .arg(height)
+                  .arg(frameBytes)
                   .arg(ui->spinChunkKB->value())
                   .arg(chunkBytes)
                   .arg(throttleMs));
@@ -1401,6 +1402,9 @@ void Widget::setReceivingUiState(bool receiving)
     m_receiving = receiving;
     ui->btnStartReceive->setEnabled(!receiving);
     ui->btnStopReceive->setEnabled(receiving);
+    ui->spinWidth->setEnabled(!receiving);
+    ui->spinHeight->setEnabled(!receiving);
+    ui->spinChunkKB->setEnabled(!receiving);
 }
 
 void Widget::appendLog(const QString &text)
