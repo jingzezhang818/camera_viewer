@@ -819,39 +819,34 @@ void Widget::on_btnStartReceive_clicked()
     const int frameBytes = streamConfig.frameBytes;
     const int chunkBytes = static_cast<int>(chunkBytes64);
     const int throttleMs = ui->spinThrottleMs->value();
+    const bool saveVideo = ui->checkSaveVideo->isChecked();
 
-    if (!startVideoDump(width, height)) {
-        appendLog("[ERROR] Cannot start receive because dump file is unavailable.");
-        return;
-    }
-
-    {
-        const QString sourcePath = QString::fromLocal8Bit(__FILE__);
-        const QString projectDirPath = QFileInfo(sourcePath).absolutePath();
-        const QString timeTag = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz");
-        const QString fileName = QString("c2h_raw_%1.bin").arg(timeTag);
-        QDir projectDir(projectDirPath);
-        m_rawDumpPath = projectDir.filePath(fileName);
-        appendLog(QString("[INFO] Raw C2H dump target: %1").arg(m_rawDumpPath));
+    if (saveVideo) {
+        if (!startVideoDump(width, height)) {
+            appendLog("[ERROR] Cannot start receive because dump file is unavailable.");
+            return;
+        }
+    } else {
+        appendLog("[INFO] Video dump disabled; frames will be previewed but not saved.");
     }
 
     m_receivedFrames = 0;
     setReceivingUiState(true);
 
-    appendLog(QString("[INFO] Start C2H receive with manual YUYV config: %1x%2, frameBytes=%3, chunk=%4KB(%5B), throttle=%6ms")
+    appendLog(QString("[INFO] Start C2H receive with manual YUYV config: %1x%2, frameBytes=%3, chunk=%4KB(%5B), throttle=%6ms, saveVideo=%7")
                   .arg(width)
                   .arg(height)
                   .arg(frameBytes)
                   .arg(ui->spinChunkKB->value())
                   .arg(chunkBytes)
-                  .arg(throttleMs));
+                  .arg(throttleMs)
+                  .arg(saveVideo ? QStringLiteral("yes") : QStringLiteral("no")));
 
     // 使用 QueuedConnection 保证 start() 在 worker 所在线程执行。
     if (!m_readerWorker || !m_readerThread || !m_readerThread->isRunning()) {
         appendLog("[ERROR] Reader thread is not ready.");
         setReceivingUiState(false);
         stopVideoDump();
-        m_rawDumpPath.clear();
         return;
     }
 
@@ -862,7 +857,7 @@ void Widget::on_btnStartReceive_clicked()
                               throttleMs,
                               width,
                               height,
-                              m_rawDumpPath);
+                              QString());
 }
 
 void Widget::on_btnStopReceive_clicked()
@@ -1405,6 +1400,7 @@ void Widget::setReceivingUiState(bool receiving)
     ui->spinWidth->setEnabled(!receiving);
     ui->spinHeight->setEnabled(!receiving);
     ui->spinChunkKB->setEnabled(!receiving);
+    ui->checkSaveVideo->setEnabled(!receiving);
 }
 
 void Widget::appendLog(const QString &text)

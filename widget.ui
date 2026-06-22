@@ -161,6 +161,16 @@
       </widget>
      </item>
      <item>
+      <widget class="QCheckBox" name="checkSaveVideo">
+       <property name="text">
+        <string>保存视频</string>
+       </property>
+       <property name="checked">
+        <bool>false</bool>
+       </property>
+      </widget>
+     </item>
+     <item>
       <spacer name="paramSpacer">
        <property name="orientation">
         <enum>Qt::Horizontal</enum>

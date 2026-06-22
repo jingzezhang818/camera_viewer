@@ -11,6 +11,7 @@
 
 #include <QtCore/QVariant>
 #include <QtWidgets/QApplication>
+#include <QtWidgets/QCheckBox>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QPlainTextEdit>
@@ -42,6 +43,7 @@ public:
     QSpinBox *spinThrottleMs;
     QLabel *labelChunk;
     QSpinBox *spinChunkKB;
+    QCheckBox *checkSaveVideo;
     QSpacerItem *paramSpacer;
     QLabel *labelPreview;
     QPlainTextEdit *plainTextEdit;
@@ -145,6 +147,12 @@ public:
 
         paramLayout->addWidget(spinChunkKB);
 
+        checkSaveVideo = new QCheckBox(Widget);
+        checkSaveVideo->setObjectName(QString::fromUtf8("checkSaveVideo"));
+        checkSaveVideo->setChecked(false);
+
+        paramLayout->addWidget(checkSaveVideo);
+
         paramSpacer = new QSpacerItem(40, 20, QSizePolicy::Expanding, QSizePolicy::Minimum);
 
         paramLayout->addItem(paramSpacer);
@@ -184,6 +192,7 @@ public:
         labelHeight->setText(QApplication::translate("Widget", "\351\253\230", nullptr));
         labelThrottle->setText(QApplication::translate("Widget", "\350\212\202\346\265\201\346\227\266\351\227\264 (ms):", nullptr));
         labelChunk->setText(QApplication::translate("Widget", "Chunk (KB):", nullptr));
+        checkSaveVideo->setText(QApplication::translate("Widget", "\344\277\235\345\255\230\350\247\206\351\242\221", nullptr));
         labelPreview->setText(QApplication::translate("Widget", "Waiting for C2H video frames...", nullptr));
     } // retranslateUi
 
