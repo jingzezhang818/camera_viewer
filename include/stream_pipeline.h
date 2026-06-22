@@ -81,8 +81,7 @@ struct VideoStreamConfig
  * - 头部 18B，payload 区域 1006B
  * - 字段布局：
  *   EB 90 | lengthH | lengthL | dest(6) | source(6) | priority(2) | payload(1006)
- * - length 优先按整包长度解释（当前发送端固定 0x0400）
- * - 为兼容旧发送端，也支持 length 表示 payload 有效字节数，范围 [0,1006]
+ * - length 固定表示整包长度 1024(0x0400)
  * - payload 其余字节可能是 0 padding，必须丢弃
  */
 class VideoPacketParser
@@ -106,12 +105,11 @@ public:
 
     /**
      * @brief 单包解析输出。
-     * payload 中只包含前 length 字节有效数据，不包含 padding。
+     * payload 中固定包含 1006B 协议 payload。
      */
     struct Packet {
         int payloadLength = 0;
         QByteArray payload;
-        bool lengthIncludesHeader = false;
     };
 
     /**
@@ -149,14 +147,12 @@ public:
     struct BatchResult {
         // 本次恢复出的真实视频字节流。
         QByteArray restoredBytes;
-        QVector<QByteArray> packetPayloads;
 
         // 输入与解析状态（本次）。
         int inputBytes = 0;
         int protocolCacheBytes = 0;
         int parsedPackets = 0;
         QVector<int> packetLengths;
-        QVector<bool> packetLengthIncludesHeader;
 
         // 异常与重同步统计（本次）。
         int syncMismatchCount = 0;
@@ -261,13 +257,6 @@ public:
     BatchResult pushBytes(const char *data, int size);
 
     /**
-     * @brief 输入一个协议包 payload，并在帧完成后丢弃该包剩余 padding。
-     *
-     * 适用于 length 表示整包长度且发送端按帧补齐包尾 padding 的场景。
-     */
-    BatchResult pushPacketPayload(const QByteArray &bytes);
-
-    /**
      * @brief 清空组帧缓存与累计计数。
      */
     void reset();
@@ -308,7 +297,6 @@ public:
     int bufferedBytes() const;
 
     BatchResult pushBytes(const QByteArray &bytes);
-    BatchResult pushPacketPayload(const QByteArray &bytes);
     void reset();
 
 private:

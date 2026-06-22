@@ -32,6 +32,8 @@ constexpr int kReaderErrorBackoffMs = 5;
 // 允许的读取 chunk 下限/上限，保证任意分段输入都能工作。
 constexpr int kMinReadChunkBytes = 1;
 constexpr int kMaxReadChunkBytes = 8 * 1024 * 1024;
+// 调试抓包会快速占满磁盘，默认只保留最终 YUYV 视频文件。
+constexpr bool kEnableRxDebugCapture = false;
 
 /**
  * @brief isValidHandle
@@ -149,21 +151,27 @@ void C2hReaderWorker::start(qulonglong c2hHandleValue,
                        .arg(streamConfig.frameBytes)
                        .arg(safeChunkBytes));
 
-    // 抓取“原始 read 数据”与“最终解包帧数据”（与 UI 显示同源），用于对比分析。
+    // 调试抓包默认关闭；正常实验只保存最终 YUYV 视频文件。
     const QString captureTs = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz");
     const QString rawCapturePath = QString("c2h_rx_raw_%1.bin").arg(captureTs);
     const QString unpackedCapturePath = QString("c2h_rx_unpacked_%1.bin").arg(captureTs);
     QFile rawCaptureFile(rawCapturePath);
     QFile unpackedCaptureFile(unpackedCapturePath);
-    const bool rawCaptureEnabled = rawCaptureFile.open(QIODevice::WriteOnly);
-    const bool unpackedCaptureEnabled = unpackedCaptureFile.open(QIODevice::WriteOnly);
-    emit workerLog(rawCaptureEnabled
-                       ? QString("[INFO] RX raw capture -> %1").arg(QFileInfo(rawCaptureFile).absoluteFilePath())
-                       : QString("[WARN] RX raw capture open failed: %1").arg(rawCapturePath));
-    emit workerLog(unpackedCaptureEnabled
-                       ? QString("[INFO] RX unpacked capture -> %1")
-                             .arg(QFileInfo(unpackedCaptureFile).absoluteFilePath())
-                       : QString("[WARN] RX unpacked capture open failed: %1").arg(unpackedCapturePath));
+    const bool rawCaptureEnabled = kEnableRxDebugCapture
+        && rawCaptureFile.open(QIODevice::WriteOnly);
+    const bool unpackedCaptureEnabled = kEnableRxDebugCapture
+        && unpackedCaptureFile.open(QIODevice::WriteOnly);
+    if (kEnableRxDebugCapture) {
+        emit workerLog(rawCaptureEnabled
+                           ? QString("[INFO] RX raw capture -> %1").arg(QFileInfo(rawCaptureFile).absoluteFilePath())
+                           : QString("[WARN] RX raw capture open failed: %1").arg(rawCapturePath));
+        emit workerLog(unpackedCaptureEnabled
+                           ? QString("[INFO] RX unpacked capture -> %1")
+                                 .arg(QFileInfo(unpackedCaptureFile).absoluteFilePath())
+                           : QString("[WARN] RX unpacked capture open failed: %1").arg(unpackedCapturePath));
+    } else {
+        emit workerLog(QStringLiteral("[INFO] RX debug captures disabled; only final YUYV video dump is saved."));
+    }
 
     // 构建两级处理模块：协议解包 + 固定帧长重组。
     StreamDepacketizer depacketizer;
@@ -423,8 +431,17 @@ void Widget::on_btnOpenXdma_clicked()
 void Widget::on_btnRunSelfTest_clicked()
 {
     // 自测只依赖 stream_pipeline，不依赖 XDMA 设备是否打开。
-    const VideoStreamConfig config = VideoStreamConfig::defaultYuy2();
-    appendLog(QString("[SELFTEST] Start: %1").arg(config.toString()));
+    const int width = ui->spinWidth->value();
+    const int height = ui->spinHeight->value();
+    const VideoStreamConfig config = VideoStreamConfig::createYuy2(width, height);
+    if (!config.isValid()) {
+        appendLog(QString("[SELFTEST] Invalid manual YUYV config: %1x%2")
+                      .arg(width)
+                      .arg(height));
+        return;
+    }
+
+    appendLog(QString("[SELFTEST] Start with manual YUYV config: %1").arg(config.toString()));
 
     const StreamPipelineSelfTestReport report = runStreamPipelineSelfTests(config);
     for (const QString &line : report.logs) {
@@ -444,10 +461,13 @@ void Widget::on_btnStartReceive_clicked()
         return;
     }
 
-    // 当前接收端使用固定参数（640x360 YUY2），帧边界由固定 frameBytes 决定。
-    const VideoStreamConfig streamConfig = VideoStreamConfig::defaultYuy2();
+    const int width = ui->spinWidth->value();
+    const int height = ui->spinHeight->value();
+    const VideoStreamConfig streamConfig = VideoStreamConfig::createYuy2(width, height);
     if (!streamConfig.isValid()) {
-        appendLog("[ERROR] Internal stream config is invalid.");
+        appendLog(QString("[ERROR] Invalid manual YUYV config: %1x%2")
+                      .arg(width)
+                      .arg(height));
         return;
     }
 
@@ -458,36 +478,31 @@ void Widget::on_btnStartReceive_clicked()
         return;
     }
 
-    const int width = streamConfig.width;
-    const int height = streamConfig.height;
     const int frameBytes = streamConfig.frameBytes;
     const int chunkBytes = static_cast<int>(chunkBytes64);
     const int throttleMs = ui->spinThrottleMs->value();
+    const bool saveVideo = ui->checkSaveVideo->isChecked();
 
-    // 将 UI 中宽高同步为固定配置，避免用户误以为当前读取按 UI 宽高生效。
-    if (ui->spinWidth->value() != width || ui->spinHeight->value() != height) {
-        appendLog(QString("[WARN] UI resolution overridden by fixed stream config: %1x%2 -> %3x%4")
-                      .arg(ui->spinWidth->value())
-                      .arg(ui->spinHeight->value())
-                      .arg(width)
-                      .arg(height));
-    }
-    ui->spinWidth->setValue(width);
-    ui->spinHeight->setValue(height);
-
-    if (!startVideoDump(width, height)) {
-        appendLog("[ERROR] Cannot start receive because dump file is unavailable.");
-        return;
+    if (saveVideo) {
+        if (!startVideoDump(width, height)) {
+            appendLog("[ERROR] Cannot start receive because dump file is unavailable.");
+            return;
+        }
+    } else {
+        appendLog("[INFO] Video dump disabled; frames will be previewed but not saved.");
     }
 
     m_receivedFrames = 0;
     setReceivingUiState(true);
 
-    appendLog(QString("[INFO] Start C2H receive with fixed config: %1, chunk=%2KB(%3B), throttle=%4ms")
-                  .arg(streamConfig.toString())
+    appendLog(QString("[INFO] Start C2H receive with manual YUYV config: %1x%2, frameBytes=%3, chunk=%4KB(%5B), throttle=%6ms, saveVideo=%7")
+                  .arg(width)
+                  .arg(height)
+                  .arg(frameBytes)
                   .arg(ui->spinChunkKB->value())
                   .arg(chunkBytes)
-                  .arg(throttleMs));
+                  .arg(throttleMs)
+                  .arg(saveVideo ? QStringLiteral("yes") : QStringLiteral("no")));
 
     // 使用 QueuedConnection 保证 start() 在 worker 所在线程执行。
     const qulonglong handleValue = static_cast<qulonglong>(reinterpret_cast<quintptr>(m_c2h0Handle));
@@ -1039,6 +1054,10 @@ void Widget::setReceivingUiState(bool receiving)
     m_receiving = receiving;
     ui->btnStartReceive->setEnabled(!receiving);
     ui->btnStopReceive->setEnabled(receiving);
+    ui->spinWidth->setEnabled(!receiving);
+    ui->spinHeight->setEnabled(!receiving);
+    ui->spinChunkKB->setEnabled(!receiving);
+    ui->checkSaveVideo->setEnabled(!receiving);
 }
 
 void Widget::appendLog(const QString &text)
